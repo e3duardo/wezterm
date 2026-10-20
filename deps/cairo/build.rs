@@ -8,6 +8,11 @@ fn new_build() -> cc::Build {
     cfg.flag_if_supported("-Wno-incompatible-pointer-types");
     cfg.flag_if_supported("-Wno-parentheses-equality");
     cfg.flag_if_supported("-Wno-unused-value");
+    // Evita colisão de símbolos com libcairo/libpixman do sistema quando
+    // outra lib no mesmo processo também depende delas (ex: GTK/Pango via
+    // o backend gtk) - mesma classe de bug documentada em
+    // deps/harfbuzz/build.rs e deps/freetype/build.rs.
+    cfg.flag_if_supported("-fvisibility=hidden");
     cfg
 }
 

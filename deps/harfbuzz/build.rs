@@ -19,6 +19,16 @@ fn harfbuzz() {
     cfg.flag_if_supported("-std=c++11");
     cfg.flag_if_supported("-fno-stack-check");
     cfg.flag_if_supported("-Wno-format-overflow");
+    // Sem isso, os símbolos do HarfBuzz vendorizado aqui ficam exportados
+    // globalmente no binário final. Quando alguma outra lib carregada no
+    // mesmo processo também depende da libharfbuzz.so.0 do sistema (ex:
+    // o backend gtk puxa isso via Pango), o resolvedor de símbolos do
+    // linker pode escolher ESSA versão vendorizada em vez da do sistema
+    // (o executável tem prioridade por padrão), e como são builds/ABIs
+    // diferentes por dentro, isso corrompe memória - causou um segfault
+    // real dentro de hb_ot_metrics_get_position via pango_context_get_metrics.
+    cfg.flag_if_supported("-fvisibility=hidden");
+    cfg.flag_if_supported("-fvisibility-inlines-hidden");
 
     let build_dir = out_dir.join("harfbuzz-build");
     fs::create_dir_all(&build_dir).unwrap();
