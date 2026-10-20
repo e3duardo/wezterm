@@ -293,15 +293,15 @@ impl Context {
             if ctxt.version >= &Version(Api::Gl, 3, 0) ||
                ctxt.extensions.gl_arb_framebuffer_object
             {
-                unsafe { ctxt.gl.BindFramebuffer(gl::FRAMEBUFFER, 0); }
+                unsafe { ctxt.gl.BindFramebuffer(gl::FRAMEBUFFER, ctxt.state.default_framebuffer); }
                 ctxt.state.draw_framebuffer = 0;
                 ctxt.state.read_framebuffer = 0;
             } else if ctxt.version >= &Version(Api::GlEs, 2, 0) {
-                unsafe { ctxt.gl.BindFramebuffer(gl::FRAMEBUFFER, 0); }
+                unsafe { ctxt.gl.BindFramebuffer(gl::FRAMEBUFFER, ctxt.state.default_framebuffer); }
                 ctxt.state.draw_framebuffer = 0;
                 ctxt.state.read_framebuffer = 0;
             } else if ctxt.extensions.gl_ext_framebuffer_object {
-                unsafe { ctxt.gl.BindFramebufferEXT(gl::FRAMEBUFFER_EXT, 0); }
+                unsafe { ctxt.gl.BindFramebufferEXT(gl::FRAMEBUFFER_EXT, ctxt.state.default_framebuffer); }
                 ctxt.state.draw_framebuffer = 0;
                 ctxt.state.read_framebuffer = 0;
             } else {
@@ -540,6 +540,95 @@ impl Context {
     {
         let _ctxt = self.make_current();
         action()
+    }
+
+    /// Forces glium to forget what it believes is currently bound
+    /// (textures/samplers, the active program, the bound vertex array,
+    /// the viewport and the scissor rect), so the next draw call reissues
+    /// the real GL calls instead of skipping ones it thinks are already
+    /// correct.
+    ///
+    /// This is a local patch (not upstream glium), added for sharing a GL
+    /// context with GTK4's GLArea widget: GTK touches this same context
+    /// between our frames (binding its own textures since GTK 4.14's NGL
+    /// renderer; changing the viewport/scissor on every resize), but
+    /// glium's cache doesn't know any of that happened, so it keeps
+    /// skipping calls it thinks are redundant - the GPU ends up with
+    /// GTK's last-set state instead of glium's, producing corrupted/
+    /// garbled output (most visible right after a resize, when the
+    /// viewport GTK set no longer matches what glium assumes). Call this
+    /// once per frame, before any glium draw call, whenever the context
+    /// may have been touched by non-glium code since the last frame. See
+    /// <https://github.com/glium/glium/issues/2106> for the upstream
+    /// report of the texture half of this; the viewport/scissor half is
+    /// the same root cause, found while adapting this for wezterm.
+    #[inline]
+    pub unsafe fn invalidate_texture_binding_cache(&self) {
+        let mut ctxt = self.make_current();
+
+        // Em vez de "forçar" um valor (0, ou um sentinela impossível) e
+        // torcer pra dar certo - o que já deu errado nos dois sentidos
+        // (0 = glium às vezes pula um rebind que precisava acontecer;
+        // sentinela = glium às vezes rebinda pra algo que NÃO devia, tipo
+        // o framebuffer 0 do sistema em vez do FBO que o
+        // GtkGLArea::attach_buffers() preparou, dando tela preta) -
+        // consultamos o estado REAL da GPU via glGetIntegerv e
+        // sincronizamos o cache do glium com a realidade. Assim o glium
+        // SEMPRE decide certo se precisa reemitir um bind ou não,
+        // independente do que o GTK mexeu por baixo entre os nossos
+        // quadros.
+        // Framebuffer: o que estiver ligado agora (o FBO que o
+        // GtkGLArea::attach_buffers() acabou de preparar) passa a ser "o
+        // framebuffer padrão" do glium. O cache guarda o id lógico 0 e
+        // todo glBindFramebuffer traduz 0 -> default_framebuffer. Sem
+        // isso, o glium via "está ligado o FBO N, eu quero o 0" e ligava
+        // o framebuffer 0 de verdade - que ninguém exibe (tela some).
+        let mut fbo: gl::types::GLint = 0;
+        ctxt.gl.GetIntegerv(gl::DRAW_FRAMEBUFFER_BINDING, &mut fbo);
+        let fbo = fbo as gl::types::GLuint;
+        ctxt.state.default_framebuffer = fbo;
+        ctxt.state.draw_framebuffer = 0;
+
+        let mut read_fbo: gl::types::GLint = 0;
+        ctxt.gl.GetIntegerv(gl::READ_FRAMEBUFFER_BINDING, &mut read_fbo);
+        let read_fbo = read_fbo as gl::types::GLuint;
+        ctxt.state.read_framebuffer = if read_fbo == fbo { 0 } else { read_fbo };
+
+        let mut vao: gl::types::GLint = 0;
+        ctxt.gl.GetIntegerv(gl::VERTEX_ARRAY_BINDING, &mut vao);
+        ctxt.state.vertex_array = vao as gl::types::GLuint;
+
+        let mut vbo: gl::types::GLint = 0;
+        ctxt.gl.GetIntegerv(gl::ARRAY_BUFFER_BINDING, &mut vbo);
+        ctxt.state.array_buffer_binding = vbo as gl::types::GLuint;
+
+        let mut program: gl::types::GLint = 0;
+        ctxt.gl.GetIntegerv(gl::CURRENT_PROGRAM, &mut program);
+        ctxt.state.program = crate::Handle::Id(program as gl::types::GLuint);
+
+        let mut active_tex: gl::types::GLint = 0;
+        ctxt.gl.GetIntegerv(gl::ACTIVE_TEXTURE, &mut active_tex);
+        // glGetIntegerv devolve a constante bruta (GL_TEXTURE0 = 33984,
+        // GL_TEXTURE1 = 33985, ...), mas o glium guarda isso como índice
+        // simples (0, 1, 2...) direto em texture_units[active_texture] -
+        // sem subtrair a base, isso vira "index out of bounds".
+        ctxt.state.active_texture = (active_tex as gl::types::GLenum).saturating_sub(gl::TEXTURE0);
+
+        // Pras texturas, não dá pra consultar barato "o que está
+        // vinculado em CADA unidade" sem trocar de unidade ativa pra
+        // cada uma (caro, e ainda arriscaria mexer em estado). Como já
+        // fizemos acima a unidade ativa bater com a realidade, e cada
+        // unidade individual não importa pro draw seguinte até o glium
+        // ativá-la de novo (ele sempre faz glActiveTexture antes de
+        // glBindTexture), zerar aqui é seguro: ou bate com a realidade
+        // por acaso (sem custo), ou força um bind novo mesmo (correto).
+        for unit in ctxt.state.texture_units.iter_mut() {
+            unit.texture = 0;
+            unit.sampler = 0;
+        }
+
+        ctxt.state.viewport = None;
+        ctxt.state.scissor = None;
     }
 
     /// Asserts that there are no OpenGL errors pending.

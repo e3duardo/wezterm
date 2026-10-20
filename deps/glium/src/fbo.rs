@@ -1170,17 +1170,21 @@ impl GlObject for FrameBufferObject {
 pub unsafe fn bind_framebuffer(ctxt: &mut CommandContext<'_>, fbo_id: gl::types::GLuint,
                                draw: bool, read: bool)
 {
+    // Local patch: the cache keeps logical ids (0 = default framebuffer),
+    // but the real GL call must target `default_framebuffer` (see GlState).
+    let real_id = if fbo_id == 0 { ctxt.state.default_framebuffer } else { fbo_id };
+
     if draw && read {
         if ctxt.state.draw_framebuffer != fbo_id || ctxt.state.read_framebuffer != fbo_id {
             if ctxt.version >= &Version(Api::Gl, 3, 0) ||
                ctxt.version >= &Version(Api::GlEs, 2, 0) ||
                ctxt.extensions.gl_arb_framebuffer_object
             {
-                ctxt.gl.BindFramebuffer(gl::FRAMEBUFFER, fbo_id);
+                ctxt.gl.BindFramebuffer(gl::FRAMEBUFFER, real_id);
                 ctxt.state.draw_framebuffer = fbo_id;
                 ctxt.state.read_framebuffer = fbo_id;
             } else if ctxt.extensions.gl_ext_framebuffer_object {
-                ctxt.gl.BindFramebufferEXT(gl::FRAMEBUFFER_EXT, fbo_id);
+                ctxt.gl.BindFramebufferEXT(gl::FRAMEBUFFER_EXT, real_id);
                 ctxt.state.draw_framebuffer = fbo_id;
                 ctxt.state.read_framebuffer = fbo_id;
             } else {
@@ -1195,14 +1199,14 @@ pub unsafe fn bind_framebuffer(ctxt: &mut CommandContext<'_>, fbo_id: gl::types:
             if ctxt.version >= &Version(Api::Gl, 3, 0) ||
                ctxt.extensions.gl_arb_framebuffer_object
             {
-                ctxt.gl.BindFramebuffer(gl::DRAW_FRAMEBUFFER, fbo_id);
+                ctxt.gl.BindFramebuffer(gl::DRAW_FRAMEBUFFER, real_id);
                 ctxt.state.draw_framebuffer = fbo_id;
             } else if ctxt.version >= &Version(Api::GlEs, 2, 0) {
-                ctxt.gl.BindFramebuffer(gl::FRAMEBUFFER, fbo_id);
+                ctxt.gl.BindFramebuffer(gl::FRAMEBUFFER, real_id);
                 ctxt.state.draw_framebuffer = fbo_id;
                 ctxt.state.read_framebuffer = fbo_id;
             } else if ctxt.extensions.gl_ext_framebuffer_object {
-                ctxt.gl.BindFramebufferEXT(gl::FRAMEBUFFER_EXT, fbo_id);
+                ctxt.gl.BindFramebufferEXT(gl::FRAMEBUFFER_EXT, real_id);
                 ctxt.state.draw_framebuffer = fbo_id;
                 ctxt.state.read_framebuffer = fbo_id;
             } else {
@@ -1214,14 +1218,14 @@ pub unsafe fn bind_framebuffer(ctxt: &mut CommandContext<'_>, fbo_id: gl::types:
             if ctxt.version >= &Version(Api::Gl, 3, 0) ||
                ctxt.extensions.gl_arb_framebuffer_object
             {
-                ctxt.gl.BindFramebuffer(gl::READ_FRAMEBUFFER, fbo_id);
+                ctxt.gl.BindFramebuffer(gl::READ_FRAMEBUFFER, real_id);
                 ctxt.state.read_framebuffer = fbo_id;
             } else if ctxt.version >= &Version(Api::GlEs, 2, 0) {
-                ctxt.gl.BindFramebuffer(gl::FRAMEBUFFER, fbo_id);
+                ctxt.gl.BindFramebuffer(gl::FRAMEBUFFER, real_id);
                 ctxt.state.draw_framebuffer = fbo_id;
                 ctxt.state.read_framebuffer = fbo_id;
             } else if ctxt.extensions.gl_ext_framebuffer_object {
-                ctxt.gl.BindFramebufferEXT(gl::FRAMEBUFFER_EXT, fbo_id);
+                ctxt.gl.BindFramebufferEXT(gl::FRAMEBUFFER_EXT, real_id);
                 ctxt.state.draw_framebuffer = fbo_id;
                 ctxt.state.read_framebuffer = fbo_id;
             } else {

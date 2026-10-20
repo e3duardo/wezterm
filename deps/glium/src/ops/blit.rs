@@ -32,9 +32,14 @@ pub fn blit(context: &Context, source: Option<&ValidatedAttachments<'_>>,
             ctxt.state.enabled_scissor_test = false;
         }
 
+        // Local patch: translate the logical default framebuffer (0) into
+        // its real GL name (see GlState::default_framebuffer).
+        let real_source = if source == 0 { ctxt.state.default_framebuffer } else { source };
+        let real_target = if target == 0 { ctxt.state.default_framebuffer } else { target };
+
         // trying to do a named blit if possible
         if ctxt.version >= &Version(Api::Gl, 4, 5) {
-            ctxt.gl.BlitNamedFramebuffer(source, target,
+            ctxt.gl.BlitNamedFramebuffer(real_source, real_target,
                 src_rect.left as gl::types::GLint,
                 src_rect.bottom as gl::types::GLint,
                 (src_rect.left + src_rect.width) as gl::types::GLint,
@@ -49,11 +54,11 @@ pub fn blit(context: &Context, source: Option<&ValidatedAttachments<'_>>,
         // binding source framebuffer
         if ctxt.state.read_framebuffer != source {
             if ctxt.version >= &Version(Api::Gl, 3, 0) {
-                ctxt.gl.BindFramebuffer(gl::READ_FRAMEBUFFER, source);
+                ctxt.gl.BindFramebuffer(gl::READ_FRAMEBUFFER, real_source);
                 ctxt.state.read_framebuffer = source;
 
             } else {
-                ctxt.gl.BindFramebufferEXT(gl::READ_FRAMEBUFFER_EXT, source);
+                ctxt.gl.BindFramebufferEXT(gl::READ_FRAMEBUFFER_EXT, real_source);
                 ctxt.state.read_framebuffer = source;
             }
         }
@@ -61,11 +66,11 @@ pub fn blit(context: &Context, source: Option<&ValidatedAttachments<'_>>,
         // binding target framebuffer
         if ctxt.state.draw_framebuffer != target {
             if ctxt.version >= &Version(Api::Gl, 3, 0) {
-                ctxt.gl.BindFramebuffer(gl::DRAW_FRAMEBUFFER, target);
+                ctxt.gl.BindFramebuffer(gl::DRAW_FRAMEBUFFER, real_target);
                 ctxt.state.draw_framebuffer = target;
 
             } else {
-                ctxt.gl.BindFramebufferEXT(gl::DRAW_FRAMEBUFFER_EXT, target);
+                ctxt.gl.BindFramebufferEXT(gl::DRAW_FRAMEBUFFER_EXT, real_target);
                 ctxt.state.draw_framebuffer = target;
             }
         }

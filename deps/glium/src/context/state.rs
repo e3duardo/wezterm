@@ -155,6 +155,15 @@ pub struct GlState {
     /// The latest buffer bound to `GL_DRAW_FRAMEBUFFER`.
     pub draw_framebuffer: gl::types::GLuint,
 
+    /// Local patch (not upstream glium): the real GL name of what glium
+    /// treats as "the default framebuffer". `read_framebuffer` and
+    /// `draw_framebuffer` above keep caching the *logical* id (0 means
+    /// default); every actual `glBindFramebuffer` call translates 0 into
+    /// this value. Normally 0, but a GTK4 GLArea renders into its own FBO,
+    /// so the gtk backend sets this to that FBO each frame via
+    /// `Context::invalidate_texture_binding_cache`.
+    pub default_framebuffer: gl::types::GLuint,
+
     /// The latest values passed to `glReadBuffer` with the default framebuffer.
     /// `None` means "unknown".
     pub default_framebuffer_read: Option<gl::types::GLenum>,
@@ -428,6 +437,7 @@ impl Default for GlState {
             indexed_transform_feedback_buffer_bindings: small_vec_one(),
             read_framebuffer: 0,
             draw_framebuffer: 0,
+            default_framebuffer: 0,
             default_framebuffer_read: None,
             renderbuffer: 0,
             depth_func: gl::LESS,
