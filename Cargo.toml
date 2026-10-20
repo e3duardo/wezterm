@@ -282,3 +282,10 @@ zvariant = "4.0"
 # We use our own vendored cairo, which has minimal deps and should just
 # build via cargo.
 cairo-sys-rs = {path="deps/cairo", version="0.18.0"}
+# Local fork of glium 0.35.0 adding Context::invalidate_texture_binding_cache(),
+# needed only by the gtk backend (window/src/os/gtk4) to work around
+# https://github.com/glium/glium/issues/2106 - glium and GTK4's GLArea
+# fight over OpenGL texture binding state when sharing a context, since
+# GTK 4.14's NGL renderer rebinds textures glium doesn't know changed.
+# See deps/glium/src/context/mod.rs for the added method's doc comment.
+glium = {path="deps/glium", version="0.35.0"}
