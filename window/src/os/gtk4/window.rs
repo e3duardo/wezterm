@@ -432,15 +432,25 @@ impl WindowOps for GtkWindow {
         // panica ("RefCell already borrowed"). Adiando pro próximo giro
         // do loop do GLib, o despacho de fora já terminou e soltou o
         // empréstimo.
+        //
+        // notify() também é chamado de outras threads (ex: a resolução de
+        // fonte de fallback do wezterm-font roda em background), e o
+        // idle_add_local_once panica fora da thread dona do MainContext.
+        // Por isso primeiro passamos pra thread principal via SPAWN_QUEUE,
+        // igual ao backend Wayland, e só lá agendamos o idle.
         let window = self.0;
-        glib::idle_add_local_once(move || {
-            let events = GtkConnection::with_window_inner(window, |inner| Rc::clone(&inner.events));
-            if let Some(events) = events {
-                events
-                    .borrow_mut()
-                    .dispatch(WindowEvent::Notification(Box::new(t)));
-            }
-        });
+        promise::spawn::spawn_into_main_thread(async move {
+            glib::idle_add_local_once(move || {
+                let events =
+                    GtkConnection::with_window_inner(window, |inner| Rc::clone(&inner.events));
+                if let Some(events) = events {
+                    events
+                        .borrow_mut()
+                        .dispatch(WindowEvent::Notification(Box::new(t)));
+                }
+            });
+        })
+        .detach();
     }
 
     fn set_cursor(&self, _cursor: Option<CursorIcon>) {
