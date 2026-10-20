@@ -139,6 +139,10 @@ impl GtkWindow {
         };
 
         log::trace!("antes de criar gtk4::Window");
+        // No Wayland o GTK usa o prgname como app_id da janela. Tem que
+        // bater com o .desktop (org.wezfurlong.wezterm) pro GNOME associar
+        // a janela ao ícone/atalho do dock - senão vira um app "anônimo".
+        glib::set_prgname(Some(class_name));
         let window = gtk4::Window::new();
         log::trace!("gtk4::Window criada");
         window.set_title(Some(name));
@@ -151,7 +155,6 @@ impl GtkWindow {
         gl_area.set_auto_render(false);
         window.set_child(Some(&gl_area));
 
-        let _ = class_name;
 
         let events = Rc::new(RefCell::new(WindowEventSender::new(event_handler)));
         let pixel_size = Rc::new(Cell::new((
