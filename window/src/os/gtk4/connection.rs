@@ -63,6 +63,10 @@ impl GtkConnection {
         self.windows.borrow_mut().insert(id, inner);
     }
 
+    pub(crate) fn unregister_window(&self, id: usize) -> Option<Rc<RefCell<GtkWindowInner>>> {
+        self.windows.borrow_mut().remove(&id)
+    }
+
     pub(crate) fn with_window_inner<R>(
         window: usize,
         f: impl FnOnce(&mut GtkWindowInner) -> R,

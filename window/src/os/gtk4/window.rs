@@ -289,6 +289,21 @@ impl GtkWindow {
             });
         }
 
+        // Botão de fechar da barra nativa: quem decide é o wezterm-gui
+        // (pode pedir confirmação), então barramos o fechamento do GTK e só
+        // avisamos. Se ele aceitar, chama close() (ver WindowOps::close).
+        {
+            let window_id = window_id;
+            window.connect_close_request(move |_window| {
+                let events =
+                    GtkConnection::with_window_inner(window_id, |inner| Rc::clone(&inner.events));
+                if let Some(events) = events {
+                    events.borrow_mut().dispatch(WindowEvent::CloseRequested);
+                }
+                glib::Propagation::Stop
+            });
+        }
+
         // Teclado: no Wayland, as teclas vão pra quem é dono da janela -
         // agora o GTK. Pegamos só o keycode bruto (fase Capture + Stop,
         // pra o GTK não usar Tab/F10/etc pra navegação própria) e
@@ -406,6 +421,33 @@ fn create_gl_context(
     .map_err(|e| anyhow!("glium::backend::Context::new: {e}"))
 }
 
+/// Fecha de verdade (o wezterm-gui já decidiu - ver WindowOps::close).
+///
+/// A janela sai do mapa e é destruída na hora: o wezterm-gui pode encerrar
+/// o loop logo em seguida (última janela), e uma janela que ficasse no
+/// mapa seria solta só no shutdown, com o TermWindow dropando dentro do
+/// borrow_mut do FRONT_END (panic). Já o Destroyed é adiado, porque
+/// normalmente estamos dentro do despacho do CloseRequested, segurando o
+/// RefCell de `events`. Sem o Destroyed o wezterm-gui nunca solta a
+/// janela: o processo, o pty e o programa dentro dele (zellij) ficavam
+/// vivos escondidos, e as janelas novas iam parar nesse processo fantasma.
+fn close_window(window: usize) {
+    let Some(conn) = Connection::get() else {
+        return;
+    };
+    let Some(inner) = conn.gtk().unregister_window(window) else {
+        return;
+    };
+    let (events, gtk_window) = {
+        let inner = inner.borrow();
+        (Rc::clone(&inner.events), inner.window.clone())
+    };
+    gtk_window.destroy();
+    glib::idle_add_local_once(move || {
+        events.borrow_mut().dispatch(WindowEvent::Destroyed);
+    });
+}
+
 #[async_trait(?Send)]
 impl WindowOps for GtkWindow {
     fn show(&self) {
@@ -417,7 +459,12 @@ impl WindowOps for GtkWindow {
     }
 
     fn close(&self) {
-        GtkConnection::with_window_inner(self.0, |inner| inner.window.close());
+        let window = self.0;
+        if glib::MainContext::default().is_owner() {
+            close_window(window);
+        } else {
+            promise::spawn::spawn_into_main_thread(async move { close_window(window) }).detach();
+        }
     }
 
     fn notify<T: Any + Send + Sync>(&self, t: T)
