@@ -16,6 +16,7 @@ gl_generator.workspace = true
 
 [features]
 wayland = ["wayland-client", "smithay-client-toolkit", "wayland-egl", "wayland-protocols", "wayland-backend", "wayland-protocols-plasma"]
+gtk = ["gtk4", "gdk4", "gdk4-wayland", "glib"]
 
 [dependencies]
 async-channel.workspace = true
@@ -88,6 +89,11 @@ wayland-protocols = {workspace=true, optional=true}
 wayland-protocols-plasma = {workspace=true, optional=true}
 wayland-client = {workspace=true, optional=true}
 wayland-egl = {workspace=true, optional=true}
+
+gtk4 = {workspace=true, features=["v4_16"], optional=true}
+gdk4 = {workspace=true, optional=true}
+gdk4-wayland = {workspace=true, features=["wayland_crate", "v4_16"], optional=true}
+glib = {workspace=true, optional=true}
 
 [target.'cfg(target_os="macos")'.dependencies]
 cgl.workspace = true

@@ -104,11 +104,15 @@ freetype = { path = "deps/freetype" }
 futures = "0.3"
 futures-lite = "2.3"
 futures-util = "0.3"
+gdk4 = "0.11"
+gdk4-wayland = "0.11"
 gethostname = "0.5"
 getrandom = "0.3.1"
 git2 = { version = "0.20", default-features = false, features = ["https"] }
 gl_generator = "0.14"
+glib = "0.22"
 glium = { version = "0.35", default-features = false }
+gtk4 = "0.11"
 governor = {version="0.5", default-features=false, features=["std"]}
 guillotiere = "0.6"
 harfbuzz = { path = "deps/harfbuzz" }

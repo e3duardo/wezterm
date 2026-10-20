@@ -12,6 +12,7 @@ publish = false
 [features]
 default = ["vendored-fonts", "wayland"]
 wayland = ["window/wayland"]
+gtk = ["window/gtk"]
 distro-defaults = ["config/distro-defaults"]
 vendor-nerd-font-symbols-font = ["wezterm-font/vendor-nerd-font-symbols"]
 vendor-jetbrains-font = ["wezterm-font/vendor-jetbrains"]
