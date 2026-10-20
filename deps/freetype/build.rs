@@ -6,6 +6,11 @@ fn new_build() -> cc::Build {
     cfg.warnings(false);
     cfg.flag_if_supported("-fno-stack-check");
     cfg.flag_if_supported("-Wno-deprecated-non-prototype");
+    // Evita colisão de símbolos com libfreetype/libpng/libz do sistema
+    // quando outra lib carregada no mesmo processo (ex: GTK/Pango, via o
+    // backend gtk) também depende delas - ver deps/harfbuzz/build.rs pelo
+    // relato completo do crash que isso causou.
+    cfg.flag_if_supported("-fvisibility=hidden");
     cfg
 }
 

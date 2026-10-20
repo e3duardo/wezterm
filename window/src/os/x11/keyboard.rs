@@ -529,6 +529,38 @@ impl KeyboardWithFallback {
         }
     }
 
+    /// Feed a key press/release into our xkb state directly. Used by the
+    /// gtk backend: GTK doesn't hand us the compositor's serialized
+    /// modifier masks (wl_keyboard.modifiers), so we track them ourselves.
+    pub fn update_key_state(&self, code: u32, pressed: bool) {
+        let direction = || {
+            if pressed {
+                xkb::KeyDirection::Down
+            } else {
+                xkb::KeyDirection::Up
+            }
+        };
+        let xcode = xkb::Keycode::new(code + 8);
+        self.selected.state.borrow_mut().update_key(xcode, direction());
+        self.fallback.state.borrow_mut().update_key(xcode, direction());
+    }
+
+    /// Reset modifier state to "nothing held", keeping only the given
+    /// lock states. Used by the gtk backend on focus changes.
+    pub fn reset_modifiers_with_locks(&self, caps_lock: bool, num_lock: bool) {
+        let mut locked = 0u32;
+        {
+            let keymap = self.selected.keymap.borrow();
+            if caps_lock {
+                locked |= 1 << keymap.mod_get_index(xkb::MOD_NAME_CAPS);
+            }
+            if num_lock {
+                locked |= 1 << keymap.mod_get_index(xkb::MOD_NAME_NUM);
+            }
+        }
+        self.update_modifier_state(0, 0, locked, 0);
+    }
+
     pub fn update_modifier_state(
         &self,
         mods_depressed: u32,

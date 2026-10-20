@@ -5,6 +5,8 @@ pub use self::windows::*;
 
 #[cfg(feature = "wayland")]
 pub mod wayland;
+#[cfg(feature = "gtk")]
+pub mod gtk4;
 pub mod x11;
 pub mod x_and_wayland;
 pub mod xdg_desktop_portal;
