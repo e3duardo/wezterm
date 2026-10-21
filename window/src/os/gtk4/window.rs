@@ -1,8 +1,8 @@
 use super::connection::GtkConnection;
 use crate::{
-    Clipboard, Connection, ConnectionOps, CursorIcon, Dimensions, Point, Rect,
-    RequestedWindowGeometry, ResolvedGeometry, ScreenPoint, Window, WindowEvent,
-    WindowEventSender, WindowOps,
+    Clipboard, Connection, ConnectionOps, CursorIcon, Dimensions, MouseButtons, MouseEvent,
+    MouseEventKind, MousePress, Point, Rect, RequestedWindowGeometry, ResolvedGeometry,
+    ScreenPoint, Window, WindowEvent, WindowEventSender, WindowOps,
 };
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -48,6 +48,11 @@ pub struct GtkWindowInner {
     // depois de abrir, `dimensions` (o real) costuma ser menor que isso.
     // O sinal render compara os dois e despacha o Resized que faltou.
     reported_dimensions: Dimensions,
+    // Estado do mouse que o GTK não guarda pra gente: botões seguros e a
+    // última posição (em pixels físicos). Cliques e rolagem usam a última
+    // posição do movimento, igual ao backend Wayland.
+    mouse_buttons: MouseButtons,
+    last_mouse_coords: Point,
 }
 
 /// Backend do glium que entrega os comandos GL pro framebuffer que o
@@ -170,6 +175,8 @@ impl GtkWindow {
             dimensions,
             pixel_size: Rc::clone(&pixel_size),
             reported_dimensions: dimensions,
+            mouse_buttons: MouseButtons::NONE,
+            last_mouse_coords: Point::new(0, 0),
         }));
 
         let window_handle = Window::Gtk(GtkWindow(window_id));
@@ -324,6 +331,72 @@ impl GtkWindow {
             window.add_controller(key_ctrl);
         }
 
+        // Mouse: movimento, botões e rolagem chegam no GLArea. Os botões
+        // vêm do EventControllerLegacy (eventos crus) e não do GestureClick,
+        // que se cancela quando o ponteiro anda além do limiar de arrasto -
+        // aí o "released" nunca chegava e o botão ficava preso no meio de
+        // uma seleção. Durante o arrasto o GTK mantém o grab implícito no
+        // GLArea, então o movimento continua chegando aqui.
+        {
+            let motion = gtk4::EventControllerMotion::new();
+            let window_id = window_id;
+            motion.connect_motion(move |_, x, y| {
+                send_mouse(window_id, Some((x, y)), MouseEventKind::Move, None);
+            });
+            motion.connect_leave(move |_| {
+                let events =
+                    GtkConnection::with_window_inner(window_id, |inner| Rc::clone(&inner.events));
+                if let Some(events) = events {
+                    events.borrow_mut().dispatch(WindowEvent::MouseLeave);
+                }
+            });
+            gl_area.add_controller(motion);
+
+            let buttons = gtk4::EventControllerLegacy::new();
+            buttons.connect_event(move |_, event| {
+                let pressed = match event.event_type() {
+                    gdk4::EventType::ButtonPress => true,
+                    gdk4::EventType::ButtonRelease => false,
+                    _ => return glib::Propagation::Proceed,
+                };
+                let Some(button) = event.downcast_ref::<gdk4::ButtonEvent>() else {
+                    return glib::Propagation::Proceed;
+                };
+                let (press, mask) = match button.button() {
+                    1 => (MousePress::Left, MouseButtons::LEFT),
+                    2 => (MousePress::Middle, MouseButtons::MIDDLE),
+                    3 => (MousePress::Right, MouseButtons::RIGHT),
+                    _ => return glib::Propagation::Proceed,
+                };
+                let kind = if pressed {
+                    MouseEventKind::Press(press)
+                } else {
+                    MouseEventKind::Release(press)
+                };
+                send_mouse(window_id, None, kind, Some((mask, pressed)));
+                glib::Propagation::Stop
+            });
+            gl_area.add_controller(buttons);
+
+            // DISCRETE: roda do mouse já vem em "dentes" (±1), e o touchpad
+            // é acumulado pelo GTK até completar um passo.
+            let scroll = gtk4::EventControllerScroll::new(
+                gtk4::EventControllerScrollFlags::BOTH_AXES
+                    | gtk4::EventControllerScrollFlags::DISCRETE,
+            );
+            scroll.connect_scroll(move |_, dx, dy| {
+                // No GTK, positivo é pra baixo/direita; no wezterm é o contrário.
+                if dy != 0.0 {
+                    send_mouse(window_id, None, MouseEventKind::VertWheel(-dy as i16), None);
+                }
+                if dx != 0.0 {
+                    send_mouse(window_id, None, MouseEventKind::HorzWheel(-dx as i16), None);
+                }
+                glib::Propagation::Stop
+            });
+            gl_area.add_controller(scroll);
+        }
+
         // Foco: "is-active" é o foco da janela inteira (toplevel). Ao
         // trocar de foco zeramos os modificadores (igual ao backend
         // Wayland), senão um Ctrl+Shift seguro no momento em que outra
@@ -390,6 +463,66 @@ fn handle_key(window_id: usize, keycode: u32, pressed: bool) {
             .borrow_mut()
             .dispatch(WindowEvent::AdviseModifiersLedStatus(mods, leds));
     }
+}
+
+/// Despacha um evento de mouse. `pos` vem em coordenadas lógicas do GTK,
+/// relativas ao GLArea; o wezterm quer pixels físicos. A razão sai do
+/// tamanho físico que o sinal "resize" entregou, então vale pra escala
+/// fracionária também. Sem `pos`, usa a última posição conhecida.
+fn send_mouse(
+    window_id: usize,
+    pos: Option<(f64, f64)>,
+    kind: MouseEventKind,
+    button: Option<(MouseButtons, bool)>,
+) {
+    let Some(conn) = Connection::get() else {
+        return;
+    };
+    let modifiers = conn
+        .gtk()
+        .with_keyboard(|mapper| mapper.get_key_modifiers())
+        .unwrap_or_default();
+    let dispatch = GtkConnection::with_window_inner(window_id, |inner| {
+        if let Some((x, y)) = pos {
+            let scale =
+                inner.dimensions.pixel_width as f64 / inner.gl_area.width().max(1) as f64;
+            inner.last_mouse_coords = Point::new((x * scale) as isize, (y * scale) as isize);
+        }
+        if let Some((mask, pressed)) = button {
+            if pressed {
+                inner.mouse_buttons |= mask;
+            } else {
+                inner.mouse_buttons -= mask;
+            }
+        }
+        let coords = inner.last_mouse_coords;
+        let event = MouseEvent {
+            kind,
+            coords,
+            // Igual ao backend Wayland: o Wayland não revela a posição da
+            // janela na tela, então isso é só uma aproximação.
+            screen_coords: ScreenPoint::new(
+                coords.x + inner.dimensions.pixel_width as isize,
+                coords.y + inner.dimensions.pixel_height as isize,
+            ),
+            mouse_buttons: inner.mouse_buttons,
+            modifiers,
+        };
+        (Rc::clone(&inner.events), event)
+    });
+    if let Some((events, event)) = dispatch {
+        events.borrow_mut().dispatch(WindowEvent::MouseEvent(event));
+    }
+}
+
+/// O clipboard do GDK correspondente (CLIPBOARD ou a seleção PRIMARY, a
+/// do clique do meio).
+fn gdk_clipboard(clipboard: Clipboard) -> Option<gdk4::Clipboard> {
+    let display = gdk4::Display::default()?;
+    Some(match clipboard {
+        Clipboard::Clipboard => display.clipboard(),
+        Clipboard::PrimarySelection => display.primary_clipboard(),
+    })
 }
 
 fn create_gl_context(
@@ -549,12 +682,38 @@ impl WindowOps for GtkWindow {
         }
     }
 
-    fn get_clipboard(&self, _clipboard: Clipboard) -> promise::Future<String> {
-        promise::Future::err(anyhow!("clipboard ainda não implementado no backend gtk"))
+    fn get_clipboard(&self, clipboard: Clipboard) -> promise::Future<String> {
+        let mut promise = promise::Promise::new();
+        let future = promise.get_future().unwrap();
+        // O GDK só pode ser usado na thread principal, e a leitura dele é
+        // um future que não é Send: passa pra thread principal pela
+        // SPAWN_QUEUE e roda a leitura no MainContext do GLib.
+        promise::spawn::spawn_into_main_thread(async move {
+            glib::MainContext::default().spawn_local(async move {
+                let Some(gdk_clipboard) = gdk_clipboard(clipboard) else {
+                    promise.err(anyhow!("sem display GDK"));
+                    return;
+                };
+                let _ = match gdk_clipboard.read_text_future().await {
+                    // Igual ao backend Wayland: normaliza pra fim de linha
+                    // unix (copiar do Firefox etc. traz \r\n).
+                    Ok(Some(text)) => promise.ok(text.replace("\r\n", "\n")),
+                    Ok(None) => promise.ok(String::new()),
+                    Err(e) => promise.err(anyhow!("lendo clipboard: {e}")),
+                };
+            });
+        })
+        .detach();
+        future
     }
 
-    fn set_clipboard(&self, _clipboard: Clipboard, _text: String) {
-        log::warn!("set_clipboard ainda não implementado no backend gtk");
+    fn set_clipboard(&self, clipboard: Clipboard, text: String) {
+        promise::spawn::spawn_into_main_thread(async move {
+            if let Some(gdk_clipboard) = gdk_clipboard(clipboard) {
+                gdk_clipboard.set_text(&text);
+            }
+        })
+        .detach();
     }
 
     fn set_window_position(&self, _coords: ScreenPoint) {}
