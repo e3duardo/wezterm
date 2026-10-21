@@ -152,7 +152,7 @@ impl GtkWindow {
         log::trace!("gtk4::Window criada");
         window.set_title(Some(name));
         window.set_default_size(width as i32, height as i32);
-        window.set_decorated(true);
+        window.set_decorated(decorated(&config));
 
         let gl_area = gtk4::GLArea::new();
         log::trace!("gtk4::GLArea criada");
@@ -222,7 +222,7 @@ impl GtkWindow {
                         return None;
                     }
                     let pending_resize = (inner.dimensions != inner.reported_dimensions)
-                        .then_some(inner.dimensions);
+                        .then(|| (inner.dimensions, window_state(&inner.window)));
                     inner.reported_dimensions = inner.dimensions;
                     Some((
                         Rc::clone(&inner.events),
@@ -236,10 +236,10 @@ impl GtkWindow {
                 // código do wezterm-gui que desenha de verdade, e esse
                 // código pode chamar outros métodos do WindowOps.
                 if let Some((events, gl_context, pending_resize)) = events {
-                    if let Some(dimensions) = pending_resize {
+                    if let Some((dimensions, window_state)) = pending_resize {
                         events.borrow_mut().dispatch(WindowEvent::Resized {
                             dimensions,
-                            window_state: crate::WindowState::default(),
+                            window_state,
                             live_resizing: false,
                         });
                     }
@@ -283,13 +283,17 @@ impl GtkWindow {
                         return None;
                     }
                     inner.reported_dimensions = inner.dimensions;
-                    Some((Rc::clone(&inner.events), inner.dimensions))
+                    Some((
+                        Rc::clone(&inner.events),
+                        inner.dimensions,
+                        window_state(&inner.window),
+                    ))
                 })
                 .flatten();
-                if let Some((events, dimensions)) = dispatch {
+                if let Some((events, dimensions, window_state)) = dispatch {
                     events.borrow_mut().dispatch(WindowEvent::Resized {
                         dimensions,
-                        window_state: crate::WindowState::default(),
+                        window_state,
                         live_resizing: false,
                     });
                 }
@@ -397,6 +401,33 @@ impl GtkWindow {
             gl_area.add_controller(scroll);
         }
 
+        // Arrastar arquivos pra dentro: o wezterm-gui cola os caminhos
+        // (ou faz o que `quote_dropped_files` mandar).
+        {
+            let drop = gtk4::DropTarget::new(
+                gdk4::FileList::static_type(),
+                gdk4::DragAction::COPY,
+            );
+            let window_id = window_id;
+            drop.connect_drop(move |_, value, _, _| {
+                let Ok(files) = value.get::<gdk4::FileList>() else {
+                    return false;
+                };
+                let paths: Vec<std::path::PathBuf> =
+                    files.files().iter().filter_map(|f| f.path()).collect();
+                if paths.is_empty() {
+                    return false;
+                }
+                let events =
+                    GtkConnection::with_window_inner(window_id, |inner| Rc::clone(&inner.events));
+                if let Some(events) = events {
+                    events.borrow_mut().dispatch(WindowEvent::DroppedFile(paths));
+                }
+                true
+            });
+            gl_area.add_controller(drop);
+        }
+
         // Foco: "is-active" é o foco da janela inteira (toplevel). Ao
         // trocar de foco zeramos os modificadores (igual ao backend
         // Wayland), senão um Ctrl+Shift seguro no momento em que outra
@@ -463,6 +494,32 @@ fn handle_key(window_id: usize, keycode: u32, pressed: bool) {
             .borrow_mut()
             .dispatch(WindowEvent::AdviseModifiersLedStatus(mods, leds));
     }
+}
+
+/// A barra de título nativa do GTK só aparece com TITLE em
+/// `window_decorations`; sem ela a janela fica sem decoração nenhuma.
+fn decorated(config: &ConfigHandle) -> bool {
+    config
+        .window_decorations
+        .contains(crate::WindowDecorations::TITLE)
+}
+
+fn window_state(window: &gtk4::Window) -> crate::WindowState {
+    let mut state = crate::WindowState::default();
+    if window.is_maximized() {
+        state |= crate::WindowState::MAXIMIZED;
+    }
+    if window.is_fullscreen() {
+        state |= crate::WindowState::FULL_SCREEN;
+    }
+    state
+}
+
+/// A gtk4::Window, clonada pra fora do empréstimo de `inner`: maximizar,
+/// tela cheia, decoração etc. podem fazer o GTK realocar o tamanho na
+/// hora, e o sinal "resize" pegaria `inner` emprestado de novo.
+fn gtk_window(window_id: usize) -> Option<gtk4::Window> {
+    GtkConnection::with_window_inner(window_id, |inner| inner.window.clone())
 }
 
 /// Despacha um evento de mouse. `pos` vem em coordenadas lógicas do GTK,
@@ -633,8 +690,14 @@ impl WindowOps for GtkWindow {
         .detach();
     }
 
-    fn set_cursor(&self, _cursor: Option<CursorIcon>) {
-        // TODO(marco 7): cursor via gdk::Cursor.
+    fn set_cursor(&self, cursor: Option<CursorIcon>) {
+        // Os nomes do cursor-icon são os nomes CSS, os mesmos que o GDK
+        // aceita; None esconde o cursor (ex: enquanto digita).
+        let name = cursor.map(|c| c.name()).unwrap_or("none");
+        let area = GtkConnection::with_window_inner(self.0, |inner| inner.gl_area.clone());
+        if let Some(area) = area {
+            area.set_cursor_from_name(Some(name));
+        }
     }
 
     fn invalidate(&self) {
@@ -714,6 +777,44 @@ impl WindowOps for GtkWindow {
             }
         })
         .detach();
+    }
+
+    fn maximize(&self) {
+        if let Some(window) = gtk_window(self.0) {
+            window.maximize();
+        }
+    }
+
+    fn restore(&self) {
+        if let Some(window) = gtk_window(self.0) {
+            if window.is_fullscreen() {
+                window.unfullscreen();
+            }
+            window.unmaximize();
+        }
+    }
+
+    fn toggle_fullscreen(&self) {
+        if let Some(window) = gtk_window(self.0) {
+            if window.is_fullscreen() {
+                window.unfullscreen();
+            } else {
+                window.fullscreen();
+            }
+        }
+    }
+
+    fn focus(&self) {
+        if let Some(window) = gtk_window(self.0) {
+            window.present();
+        }
+    }
+
+    fn config_did_change(&self, config: &ConfigHandle) {
+        let decorated = decorated(config);
+        if let Some(window) = gtk_window(self.0) {
+            window.set_decorated(decorated);
+        }
     }
 
     fn set_window_position(&self, _coords: ScreenPoint) {}

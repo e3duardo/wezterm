@@ -29,16 +29,20 @@ impl GtkConnection {
         log::trace!("depois do gtk4::init(), resultado={:?}", r);
         r.map_err(|e| anyhow::anyhow!("gtk4::init failed: {e}"))?;
 
-        log::trace!("antes do timeout_add_local");
-        // TODO(marco 4+): isso é só um polling simples da SPAWN_QUEUE, não
-        // um watch de verdade no fd dela via GLib. Funciona, mas acorda o
-        // loop a cada 8ms mesmo sem trabalho pendente - revisitar depois
-        // com um g_source de fd de verdade.
-        glib::timeout_add_local(std::time::Duration::from_millis(8), || {
-            crate::spawn::SPAWN_QUEUE.run();
-            glib::ControlFlow::Continue
-        });
-        log::trace!("depois do timeout_add_local, antes do MainLoop::new");
+        // A SPAWN_QUEUE avisa que tem trabalho escrevendo num pipe: o loop
+        // do GLib só acorda quando esse fd fica legível, em vez de checar a
+        // fila a cada poucos ms. run() executa uma tarefa por vez e diz se
+        // sobrou alguma; o resto vai num idle, pra não segurar o GTK.
+        glib_unix::unix_fd_add_local(
+            crate::spawn::SPAWN_QUEUE.raw_fd(),
+            glib::IOCondition::IN,
+            |_, _| {
+                if crate::spawn::SPAWN_QUEUE.run() {
+                    drain_spawn_queue();
+                }
+                glib::ControlFlow::Continue
+            },
+        );
 
         let main_loop = glib::MainLoop::new(None, false);
         log::trace!("MainLoop criado");
@@ -127,6 +131,26 @@ fn gdk_xkb_keymap() -> Option<*mut xkb::ffi::xkb_keymap> {
     } else {
         Some(ptr as *mut xkb::ffi::xkb_keymap)
     }
+}
+
+thread_local! {
+    static DRAINING_SPAWN_QUEUE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Esvazia a SPAWN_QUEUE em idles (uma tarefa por giro do loop). Só um
+/// idle por vez: o fd dispara de novo a cada tarefa nova enfileirada.
+fn drain_spawn_queue() {
+    if DRAINING_SPAWN_QUEUE.with(|d| d.replace(true)) {
+        return;
+    }
+    glib::idle_add_local(|| {
+        if crate::spawn::SPAWN_QUEUE.run() {
+            glib::ControlFlow::Continue
+        } else {
+            DRAINING_SPAWN_QUEUE.with(|d| d.set(false));
+            glib::ControlFlow::Break
+        }
+    });
 }
 
 impl ConnectionOps for GtkConnection {
